@@ -1014,7 +1014,9 @@ impl DirectXRenderPipelines {
 impl DirectComposition {
     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
         let comp_device = get_comp_device(dxgi_device)?;
-        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
+        // CDXC:CefRuntime 2026-09-26 WHY:
+        // A topmost composition target covers child HWNDs, including windowed CEF pages. Keep the GPUI visual tree below native child windows so transparent hosts can display their embedded content.
+        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
         let comp_visual = unsafe { comp_device.CreateVisual() }?;
 
         Ok(Self {
