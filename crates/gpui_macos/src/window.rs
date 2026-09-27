@@ -3238,13 +3238,13 @@ unsafe fn apply_window_backdrop(this: &mut MacWindowState) {
             return;
         }
         if let Some(view) = this.live_view.take() {
-            window_live::remove_view(view);
+            retire_backdrop_view(view, window_live::remove_view);
         }
         if blurred && this.background_wallpaper && apply_video_backdrop(this, content_view) {
             return;
         }
         if let Some(view) = this.video_view.take() {
-            window_video::remove_view(view);
+            retire_backdrop_view(view, window_video::remove_view);
         }
         let wallpaper = if blurred && this.background_wallpaper {
             window_wallpaper::wallpaper_for_window(
@@ -3320,7 +3320,7 @@ unsafe fn apply_video_backdrop(this: &mut MacWindowState, content_view: id) -> b
             .and_then(|view| window_video::view_path(view));
         if current.as_deref() != path.to_str() {
             if let Some(view) = this.video_view.take() {
-                window_video::remove_view(view);
+                retire_backdrop_view(view, window_video::remove_view);
             }
             let Some(view) =
                 window_video::create_view(content_view, &path, this.background_video_only_on_power)
@@ -3368,7 +3368,7 @@ unsafe fn apply_live_backdrop(this: &mut MacWindowState, content_view: id) -> bo
             }
         }
         if let Some(view) = this.video_view.take() {
-            window_video::remove_view(view);
+            retire_backdrop_view(view, window_video::remove_view);
         }
         if let Some(blur_view) = this.blurred_view.take() {
             NSView::removeFromSuperview(blur_view);
@@ -3378,6 +3378,45 @@ unsafe fn apply_live_backdrop(this: &mut MacWindowState, content_view: id) -> bo
         }
         layout_window_wallpaper(this);
         true
+    }
+}
+
+/// How long an animation and a video, or two videos, cross-fade when the backdrop swaps between
+/// them; the same length as a live style's own cross-fade (`window_live::LIVE_FADE`).
+const BACKDROP_SWAP_FADE: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// Takes an animation or video backdrop off screen without a jump.
+///
+/// CDXC:Theming 2026-09-26 WHY:
+/// The user's rule for the moving glass is that it never jumps, and Live now holds both the app's animations and the user's own video. A new backdrop view is always added underneath the one on screen, so the old one fades out on top of it and is removed once the fade is over, which cross-fades an animation into a video, a video into an animation, or one video into another. Under Reduce Motion it is removed at once.
+unsafe fn retire_backdrop_view(view: id, remove: unsafe fn(id)) {
+    unsafe {
+        if window_video::reduce_motion() {
+            remove(view);
+            return;
+        }
+        let _: id = msg_send![view, retain];
+        let layer: id = msg_send![view, layer];
+        if layer != nil {
+            let fade: id = msg_send![
+                class!(CABasicAnimation),
+                animationWithKeyPath: ns_string("opacity")
+            ];
+            let from: id = msg_send![class!(NSNumber), numberWithFloat: 1.0f32];
+            let to: id = msg_send![class!(NSNumber), numberWithFloat: 0.0f32];
+            let _: () = msg_send![fade, setFromValue: from];
+            let _: () = msg_send![fade, setToValue: to];
+            let _: () = msg_send![fade, setDuration: BACKDROP_SWAP_FADE.as_secs_f64()];
+            let _: () = msg_send![layer, setOpacity: 0.0f32];
+            let _: () = msg_send![layer, addAnimation: fade forKey: ns_string("gpuiBackdropSwap")];
+        }
+        let view = view as usize;
+        let when = dispatch2::DispatchTime::NOW.time(BACKDROP_SWAP_FADE.as_nanos() as i64);
+        let _ = DispatchQueue::main().after(when, move || {
+            let view = view as id;
+            remove(view);
+            let _: () = msg_send![view, release];
+        });
     }
 }
 
