@@ -2159,8 +2159,21 @@ impl WgpuRenderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface_config.alpha_mode = alpha_mode;
+        // Only a mode the new surface supports, as `new_internal` checks: configuring an unsupported
+        // one (Mailbox on a Fifo-only Android surface) panics. Otherwise the mode already validated
+        // for this renderer stays.
         if let Some(mode) = config.preferred_present_mode {
-            self.surface_config.present_mode = mode;
+            let supported = self.context.as_ref().is_some_and(|context| {
+                context.borrow().as_ref().is_some_and(|context| {
+                    surface
+                        .get_capabilities(&context.adapter)
+                        .present_modes
+                        .contains(&mode)
+                })
+            });
+            if supported {
+                self.surface_config.present_mode = mode;
+            }
         }
 
         let mut core = match std::mem::replace(&mut self.state, RendererState::Released) {
