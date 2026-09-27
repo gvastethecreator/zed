@@ -955,6 +955,44 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
+    // Ghostex: a frosted surface keeps its blur, and everything it draws, inside the rounded rects
+    // it reports each frame (a tooltip host is exactly its bubble, a toast stack its cards). Windows
+    // can only confine a window's blur by clipping the window, so the window's region is set to
+    // their union; an empty list gives the whole window back.
+    fn set_background_blur_region(&self, region: Vec<(Bounds<Pixels>, Pixels)>) {
+        let hwnd = self.0.hwnd;
+        let scale = self.state.scale_factor.get();
+        unsafe {
+            if region.is_empty() {
+                SetWindowRgn(hwnd, None, true);
+                return;
+            }
+            let mut combined: Option<HRGN> = None;
+            for (bounds, radius) in region {
+                let device = bounds.to_device_pixels(scale);
+                let left = device.origin.x.0;
+                let top = device.origin.y.0;
+                let right = left + device.size.width.0;
+                let bottom = top + device.size.height.0;
+                let diameter = (f32::from(radius) * scale * 2.0).round() as i32;
+                let rect = CreateRoundRectRgn(left, top, right + 1, bottom + 1, diameter, diameter);
+                match combined {
+                    None => combined = Some(rect),
+                    Some(union) => {
+                        CombineRgn(Some(union), Some(union), Some(rect), RGN_OR);
+                        let _ = DeleteObject(rect.into());
+                    }
+                }
+            }
+            if let Some(union) = combined
+                && SetWindowRgn(hwnd, Some(union), true) == 0
+            {
+                // The system owns the region only once SetWindowRgn accepts it.
+                let _ = DeleteObject(union.into());
+            }
+        }
+    }
+
     // Ghostex: DWM rounds a window to one of two fixed radii (Windows 11 only; Windows 10 keeps
     // square corners), so the requested radius picks the nearer one.
     fn set_background_corner_radius(&self, radius: Pixels) {
