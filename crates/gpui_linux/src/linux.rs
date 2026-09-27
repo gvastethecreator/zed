@@ -1,4 +1,6 @@
 mod dispatcher;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod glass;
 mod headless;
 mod keyboard;
 mod platform;
