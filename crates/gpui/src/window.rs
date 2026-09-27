@@ -9406,6 +9406,7 @@ mod tests {
                         position: point(px(x), px(0.)),
                         predicted_position: None,
                         force: None,
+                        timestamp: None,
                     }
                     .to_platform_input(),
                     cx,

@@ -5062,6 +5062,7 @@ mod tests {
                         position: touch_position,
                         predicted_position: None,
                         force: None,
+                        timestamp: None,
                     }
                     .to_platform_input(),
                     cx,
@@ -5088,6 +5089,7 @@ mod tests {
                         position: moved_position,
                         predicted_position: None,
                         force: None,
+                        timestamp: None,
                     }
                     .to_platform_input(),
                     cx,
@@ -5109,6 +5111,7 @@ mod tests {
                         position: moved_position,
                         predicted_position: None,
                         force: None,
+                        timestamp: None,
                     }
                     .to_platform_input(),
                     cx,
