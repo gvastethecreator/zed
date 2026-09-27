@@ -1970,13 +1970,16 @@ impl Window {
                     .unwrap_or(DispatchEventResult::default())
             })
         });
+        // CDXC:Titlebar 2026-09-27 WHY:
+        // Windows asks this on every `WM_NCHITTEST`, before the matching mouse message reaches GPUI, and moving from the client area onto an `HTCAPTION` region ends client mouse tracking with a `WM_MOUSELEAVE` that GPUI reports as `MouseExited`. Answering from `mouse_hit_test` therefore used a stale or emptied hit test, so the answer flipped between `HTCAPTION` and `HTCLIENT` as the pointer moved and pressing the titlebar often did not move the window. The platform passes the cursor position it is asking about instead.
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
-            Box::new(move || {
+            Box::new(move |position| {
                 handle
                     .update(&mut cx, |_, window, _cx| {
+                        let hit_test = window.rendered_frame.hit_test(position);
                         for (area, hitbox) in &window.rendered_frame.window_control_hitboxes {
-                            if window.mouse_hit_test.ids.contains(&hitbox.id) {
+                            if hit_test.ids.contains(&hitbox.id) {
                                 return Some(*area);
                             }
                         }
