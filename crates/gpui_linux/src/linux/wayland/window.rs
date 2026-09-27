@@ -105,12 +105,14 @@ pub struct WaylandWindowState {
     pub surface: wl_surface::WlSurface,
     app_id: Option<String>,
     appearance: WindowAppearance,
+    background_effect: Option<wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1>,
     blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
     viewport: Option<wp_viewport::WpViewport>,
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
     renderer: WgpuRenderer,
+    glass: crate::linux::glass::Glass,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -581,6 +583,13 @@ impl WaylandWindowState {
             WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
         };
 
+        let mut glass = crate::linux::glass::Glass::with_wake(globals.frame_ping.clone());
+        glass.title = options
+            .titlebar
+            .as_ref()
+            .and_then(|bar| bar.title.as_ref())
+            .map(ToString::to_string)
+            .unwrap_or_default();
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
             if let Some(title) = options.titlebar.and_then(|titlebar| titlebar.title) {
                 xdg_state.toplevel.set_title(title.to_string());
@@ -604,6 +613,7 @@ impl WaylandWindowState {
             children: FxHashMap::default(),
             surface,
             app_id: options.app_id,
+            background_effect: None,
             blur: None,
             viewport,
             globals,
@@ -614,6 +624,7 @@ impl WaylandWindowState {
             scale: 1.0,
             input_handler: None,
             decorations: WindowDecorations::Client,
+            glass,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
             maximized: false,
@@ -769,6 +780,9 @@ impl Drop for WaylandWindow {
 
         state.renderer.destroy();
 
+        if let Some(effect) = state.background_effect.take() {
+            effect.destroy();
+        }
         // Destroy blur first, this has no dependencies.
         if let Some(blur) = &state.blur {
             blur.release();
@@ -1000,6 +1014,9 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn scheduled_frame_fired(&self) {
+        if self.state.borrow().glass.needs_frame() {
+            self.request_redraw();
+        }
         if self.frame_loop.get() == FrameLoop::Scheduled {
             self.frame();
         }
@@ -1085,6 +1102,8 @@ impl WaylandWindowStatePtr {
                     state.tiling = configure.tiling;
                     let visibility_changed = state.visibility != configure.visibility;
                     state.visibility = configure.visibility;
+                    let active = state.active && state.visibility.is_visible();
+                    state.glass.set_active(active);
                     // Limit interactive resizes to once per vblank
                     let throttled = configure.resizing && state.resize_throttle;
                     if throttled {
@@ -1557,7 +1576,12 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn set_focused(&self, focus: bool) {
-        self.state.borrow_mut().active = focus;
+        {
+            let mut state = self.state.borrow_mut();
+            state.active = focus;
+            let active = focus && state.visibility.is_visible();
+            state.glass.set_active(active);
+        }
         let callback = self.callbacks.borrow_mut().active_status_change.take();
         if let Some(mut fun) = callback {
             fun(focus);
@@ -1818,6 +1842,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn set_title(&mut self, title: &str) {
+        self.borrow_mut().glass.title = title.to_owned();
         if let Some(toplevel) = self.borrow().surface_state.toplevel() {
             toplevel.set_title(title.to_string());
         }
@@ -1839,6 +1864,27 @@ impl PlatformWindow for WaylandWindow {
         state.background_appearance = background_appearance;
         update_window(state);
         self.0.request_redraw();
+    }
+
+    fn set_background_wallpaper(&self, enabled: bool) {
+        self.borrow_mut().glass.enabled = enabled;
+    }
+    fn set_background_wallpaper_image(&self, image: Option<std::path::PathBuf>) {
+        self.borrow_mut().glass.image = image;
+    }
+    fn set_background_wallpaper_follows_screen(&self, follows: bool) {
+        self.borrow_mut().glass.follows_screen = follows;
+    }
+    fn set_background_wallpaper_cover(&self, cover: Option<Bounds<Pixels>>) {
+        self.borrow_mut().glass.cover = cover;
+    }
+    fn set_background_live(&self, live: Option<gpui::LiveBackground>) {
+        self.borrow_mut().glass.live = live;
+    }
+    fn set_background_video(&self, video: Option<std::path::PathBuf>, only_on_power: bool) {
+        let mut state = self.borrow_mut();
+        state.glass.video = video;
+        state.glass.only_on_power = only_on_power;
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
@@ -1965,6 +2011,25 @@ impl PlatformWindow for WaylandWindow {
             let callback = state.surface.frame(&state.globals.qh, state.surface.id());
             state.pending_frame_callback = Some(callback);
         }
+        let active = state.active && state.visibility.is_visible();
+        let bounds = state.bounds;
+        let screen = state
+            .display
+            .as_ref()
+            .map(|(_, display)| display.bounds.to_pixels(state.scale))
+            .unwrap_or(bounds);
+        let monitor = state
+            .display
+            .as_ref()
+            .and_then(|(_, display)| display.name.clone());
+        let light = matches!(
+            state.appearance,
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let frame = state
+            .glass
+            .frame(active, bounds, screen, monitor, light, true);
+        state.renderer.set_glass_frame(frame);
         if state.renderer.draw(scene) {
             state.presentation = PresentationState::Presented;
             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
@@ -1973,7 +2038,7 @@ impl PlatformWindow for WaylandWindow {
             self.0.frame_loop.set(FrameLoop::PresentationFailed);
         }
 
-        if state.renderer.needs_redraw() {
+        if state.renderer.needs_redraw() || state.glass.needs_frame() {
             state.redraw_requested = true;
         }
     }
@@ -2235,12 +2300,22 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
         state.surface.set_opaque_region(None);
     }
 
-    if let Some(ref blur_manager) = state.globals.blur_manager {
+    // Prefer the standard protocol; older Plasma compositors expose the KDE protocol.
+    if let Some(ref manager) = state.globals.background_effect_manager {
+        if state.background_effect.is_none() {
+            state.background_effect =
+                Some(manager.get_background_effect(&state.surface, &state.globals.qh, ()));
+        }
+        state.background_effect.as_ref().unwrap().set_blur_region(
+            (state.background_appearance == WindowBackgroundAppearance::Blurred).then_some(&region),
+        );
+    } else if let Some(ref blur_manager) = state.globals.blur_manager {
         if state.background_appearance == WindowBackgroundAppearance::Blurred {
             if state.blur.is_none() {
                 let blur = blur_manager.create(&state.surface, &state.globals.qh, ());
                 state.blur = Some(blur);
             }
+            state.blur.as_ref().unwrap().set_region(Some(&region));
             state.blur.as_ref().unwrap().commit();
         } else {
             // It probably doesn't hurt to clear the blur for opaque windows

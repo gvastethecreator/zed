@@ -73,6 +73,7 @@ x11rb::atom_manager! {
         _NET_WM_SYNC_REQUEST,
         _NET_WM_SYNC_REQUEST_COUNTER,
         _NET_WM_BYPASS_COMPOSITOR,
+        _KDE_NET_WM_BLUR_BEHIND_REGION,
         _NET_WM_MOVERESIZE,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_NOTIFICATION,
@@ -281,6 +282,7 @@ pub struct X11WindowState {
     bounds: Bounds<Pixels>,
     scale_factor: f32,
     renderer: WgpuRenderer,
+    glass: crate::linux::glass::Glass,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -629,6 +631,13 @@ impl X11WindowState {
                     xcb.configure_window(x_window, &xproto::ConfigureWindowAux::new().x(x).y(y)),
                 )?;
             }
+            let mut glass = crate::linux::glass::Glass::default();
+            glass.title = params
+                .titlebar
+                .as_ref()
+                .and_then(|bar| bar.title.as_ref())
+                .map(ToString::to_string)
+                .unwrap_or_default();
             if let Some(titlebar) = params.titlebar
                 && let Some(title) = titlebar.title
             {
@@ -908,6 +917,7 @@ impl X11WindowState {
                 hidden: false,
                 appearance,
                 handle,
+                glass,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 destroyed: false,
                 client_side_decorations_supported,
@@ -1245,6 +1255,9 @@ impl X11WindowStatePtr {
             }
         }
 
+        let active = state.active && state.visibility.is_visible();
+        state.glass.set_active(active);
+
         // The urgency hint has no withdrawal signal of its own; ICCCM leaves that to
         // the client, and focus is the conventional means for the user to zero it.
         if state.active && !was_active {
@@ -1291,6 +1304,7 @@ impl X11WindowStatePtr {
     }
 
     pub fn refresh(&self, mut request_frame_options: RequestFrameOptions) {
+        request_frame_options.force_render |= self.state.borrow().glass.needs_frame();
         let callback = self.callbacks.borrow_mut().request_frame.take();
         if let Some(mut fun) = callback {
             // Expose events can present a frame before the refresh timer runs,
@@ -1461,6 +1475,11 @@ impl X11WindowStatePtr {
     pub fn set_visibility(&self, visibility: WindowVisibility) {
         if std::mem::replace(&mut self.state.borrow_mut().visibility, visibility) == visibility {
             return;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            let active = state.active && visibility.is_visible();
+            state.glass.set_active(active);
         }
         let callback = self.callbacks.borrow_mut().visibility_change.take();
         if let Some(mut fun) = callback {
@@ -1755,6 +1774,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn set_title(&mut self, title: &str) {
+        self.0.state.borrow_mut().glass.title = title.to_owned();
         check_reply(
             || "X11 ChangeProperty8 on WM_NAME failed.",
             self.0.xcb.change_property8(
@@ -1814,6 +1834,48 @@ impl PlatformWindow for X11Window {
         state.background_appearance = background_appearance;
         let transparent = state.is_transparent();
         state.renderer.update_transparency(transparent);
+        // KWin's property is also understood by compositors implementing its blur contract.
+        // Empty CARDINAL data means the whole window; deleting it removes the request.
+        if background_appearance == WindowBackgroundAppearance::Blurred {
+            self.0
+                .xcb
+                .change_property32(
+                    xproto::PropMode::REPLACE,
+                    self.0.x_window,
+                    state.atoms._KDE_NET_WM_BLUR_BEHIND_REGION,
+                    xproto::AtomEnum::CARDINAL,
+                    &[],
+                )
+                .log_err();
+        } else {
+            self.0
+                .xcb
+                .delete_property(self.0.x_window, state.atoms._KDE_NET_WM_BLUR_BEHIND_REGION)
+                .log_err();
+        }
+        xcb_flush(&self.0.xcb);
+        state.force_render_after_recovery = true;
+    }
+
+    fn set_background_wallpaper(&self, enabled: bool) {
+        self.0.state.borrow_mut().glass.enabled = enabled;
+    }
+    fn set_background_wallpaper_image(&self, image: Option<std::path::PathBuf>) {
+        self.0.state.borrow_mut().glass.image = image;
+    }
+    fn set_background_wallpaper_follows_screen(&self, follows: bool) {
+        self.0.state.borrow_mut().glass.follows_screen = follows;
+    }
+    fn set_background_wallpaper_cover(&self, cover: Option<Bounds<Pixels>>) {
+        self.0.state.borrow_mut().glass.cover = cover;
+    }
+    fn set_background_live(&self, live: Option<gpui::LiveBackground>) {
+        self.0.state.borrow_mut().glass.live = live;
+    }
+    fn set_background_video(&self, video: Option<std::path::PathBuf>, only_on_power: bool) {
+        let mut state = self.0.state.borrow_mut();
+        state.glass.video = video;
+        state.glass.only_on_power = only_on_power;
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
@@ -1955,9 +2017,20 @@ impl PlatformWindow for X11Window {
             return;
         }
 
+        let active = inner.active && inner.visibility.is_visible();
+        let bounds = inner.bounds;
+        let screen = inner.display.bounds();
+        let light = matches!(
+            inner.appearance,
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let frame = inner
+            .glass
+            .frame(active, bounds, screen, None, light, false);
+        inner.renderer.set_glass_frame(frame);
         inner.renderer.draw(scene);
 
-        if inner.renderer.needs_redraw() {
+        if inner.renderer.needs_redraw() || inner.glass.needs_frame() {
             inner.force_render_after_recovery = true;
         }
     }
