@@ -37,15 +37,17 @@ vertex LiveVertexOut live_vertex(uint vertex_id [[vertex_id]]) {
 
 constant float LIVE_TAU = 6.28318530718;
 
-// Per-style brightness gains (see live_finish), measured with render-posters.swift --measure.
-constant float LIVE_GAIN_AURORA = 1.155;
-constant float LIVE_GAIN_INK = 0.533;
-constant float LIVE_GAIN_DRIFT = 0.599;
-constant float LIVE_GAIN_NEBULA = 1.860;
-constant float LIVE_GAIN_SILK = 0.941;
-constant float LIVE_GAIN_BOKEH = 2.041;
-constant float LIVE_GAIN_WAVES = 0.706;
-constant float LIVE_GAIN_MESH = 0.588;
+// Per-style brightness gains (see live_finish), measured with render-posters.swift --measure so
+// every style sits about 0.21 above its base at the default 60% Brightness, which still shows through
+// the default glass tints (sidebar 88% / work area 81% in dark mode).
+constant float LIVE_GAIN_AURORA = 2.001;
+constant float LIVE_GAIN_INK = 0.894;
+constant float LIVE_GAIN_DRIFT = 1.030;
+constant float LIVE_GAIN_NEBULA = 2.878;
+constant float LIVE_GAIN_SILK = 1.562;
+constant float LIVE_GAIN_BOKEH = 3.468;
+constant float LIVE_GAIN_WAVES = 1.215;
+constant float LIVE_GAIN_MESH = 1.017;
 
 static float live_angle(constant LiveUniforms &u) {
     return LIVE_TAU * u.phase / u.period;
@@ -107,11 +109,13 @@ static float3 live_palette(float t, constant LiveUniforms &u) {
     return mix(low, u.c2.rgb, smoothstep(0.45, 1.0, t));
 }
 
-// Brightness dims a style toward its deepest colour (near black in dark mode, the pale base in
-// light mode). `gain` evens the styles out, so every one sits at about the same brightness at the
-// same setting. Dithering hides the 8-bit steps a small texture shows once it is scaled up.
+// Brightness scales a style's distance from its deepest colour (near black in dark mode, the pale
+// base in light mode). `gain` evens the styles out, so every one sits at about the same brightness
+// at the same setting; a sparse style (Bokeh, Nebula) needs more than its raw colours give, so the
+// scale may go past 1 and the result is clamped. Dithering hides the 8-bit steps a small texture
+// shows once it is scaled up.
 static float4 live_finish(float3 color, float4 frag, constant LiveUniforms &u, float gain) {
-    color = mix(u.c0.rgb, color, clamp(u.brightness * gain, 0.0, 1.0));
+    color = u.c0.rgb + (color - u.c0.rgb) * clamp(u.brightness * gain, 0.0, 4.0);
     float dither = (live_hash(float3(frag.xy, 3.7)) - 0.5) / 255.0;
     return float4(clamp(color + dither, 0.0, 1.0), 1.0);
 }
