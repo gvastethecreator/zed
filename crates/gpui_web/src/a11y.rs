@@ -140,8 +140,12 @@ function whenFocused(el, replay) {
 function replayKey(input, type, init) {
   input?.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
 }
+// gpui imports typed text from the input element's `input` event (the IME path) and leaves `insertText` to the browser's default action, which a script-dispatched `beforeinput` never runs, so the edit is applied to the element here before `input` is raised.
 function replayText(input, text) {
-  if (text.length > 0) input?.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+  if (!input || text.length === 0) return;
+  const start = input.selectionStart ?? input.value.length;
+  input.setRangeText(text, start, input.selectionEnd ?? start, 'end');
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
 }
 function forwardKey(event) {
   event.preventDefault();
