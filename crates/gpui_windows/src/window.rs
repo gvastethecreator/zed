@@ -34,6 +34,51 @@ use gpui::*;
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
+impl WindowsWindow {
+    /// Ghostex: changes what this window asked its backdrop for and redraws it.
+    fn update_backdrop(&self, change: impl FnOnce(&mut BackdropRequest)) {
+        let hwnd = self.0.hwnd;
+        let active = {
+            let Ok(mut renderer) = self.state.renderer.try_borrow_mut() else {
+                log::error!("Window backdrop changed while the window was drawing");
+                return;
+            };
+            let mut request = renderer.backdrop().request().clone();
+            change(&mut request);
+            if *renderer.backdrop().request() == request {
+                return;
+            }
+            renderer.update_backdrop(request, placement_for(hwnd))
+        };
+        track_window(hwnd, Rc::downgrade(&self.0), active);
+    }
+}
+
+impl WindowsWindowInner {
+    /// Ghostex: lays the backdrop out again after the window moved, resized or changed monitor.
+    pub(crate) fn refresh_backdrop(&self) {
+        let Ok(mut renderer) = self.state.renderer.try_borrow_mut() else {
+            return;
+        };
+        let request = renderer.backdrop().request().clone();
+        if !request.blurred || !request.wallpaper {
+            return;
+        }
+        renderer.update_backdrop(request, placement_for(self.hwnd));
+    }
+
+    /// Ghostex: Windows reported a new desktop wallpaper.
+    pub(crate) fn backdrop_wallpaper_changed(&self) {
+        let Ok(mut renderer) = self.state.renderer.try_borrow_mut() else {
+            return;
+        };
+        let request = renderer.backdrop().request();
+        if request.blurred && request.wallpaper && request.image.is_none() {
+            renderer.backdrop_wallpaper_changed();
+        }
+    }
+}
+
 impl std::ops::Deref for WindowsWindow {
     type Target = WindowsWindowInner;
 
@@ -953,6 +998,29 @@ impl PlatformWindow for WindowsWindow {
                 dwm_set_window_composition_attribute(hwnd, 4);
             }
         }
+        self.update_backdrop(|request| {
+            request.blurred = background_appearance == WindowBackgroundAppearance::Blurred;
+        });
+    }
+
+    fn set_background_wallpaper(&self, wallpaper: bool) {
+        self.update_backdrop(|request| request.wallpaper = wallpaper);
+    }
+
+    fn set_background_wallpaper_image(&self, image: Option<std::path::PathBuf>) {
+        self.update_backdrop(|request| request.image = image);
+    }
+
+    fn set_background_wallpaper_follows_screen(&self, follows_screen: bool) {
+        self.update_backdrop(|request| request.follows_screen = follows_screen);
+    }
+
+    fn set_background_wallpaper_cover(&self, cover: Option<Bounds<Pixels>>) {
+        self.update_backdrop(|request| request.cover = cover);
+    }
+
+    fn set_background_live(&self, live: Option<gpui::LiveBackground>) {
+        self.update_backdrop(|request| request.live = live);
     }
 
     // Ghostex: a frosted surface keeps its blur, and everything it draws, inside the rounded rects

@@ -218,6 +218,7 @@ impl WindowsWindowInner {
             callback();
             self.state.callbacks.moved.set(Some(callback));
         }
+        self.refresh_backdrop();
         Some(0)
     }
 
@@ -285,6 +286,9 @@ impl WindowsWindowInner {
             self.state
                 .invalidate_devices
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+        if should_resize_renderer {
+            self.refresh_backdrop();
         }
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
@@ -998,6 +1002,7 @@ impl WindowsWindowInner {
         }
         let new_display = WindowsDisplay::new(WindowsDisplay::display_id_for_monitor(new_monitor))?;
         self.state.display.set(new_display);
+        self.refresh_backdrop();
         Some(0)
     }
 
@@ -1259,6 +1264,9 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        if wparam.0 == SPI_SETDESKWALLPAPER.0 as usize {
+            self.backdrop_wallpaper_changed();
+        }
         if wparam.0 != 0 {
             self.state.click_state.system_update(wparam.0);
             self.state.border_offset.update(handle).log_err();

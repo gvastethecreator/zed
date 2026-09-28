@@ -39,11 +39,13 @@ pub(crate) struct FontInfo {
 pub(crate) struct DirectXRenderer {
     hwnd: HWND,
     atlas: Arc<DirectXAtlas>,
-    devices: Option<DirectXRendererDevices>,
+    pub(crate) devices: Option<DirectXRendererDevices>,
     resources: Option<DirectXResources>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
-    direct_composition: Option<DirectComposition>,
+    pub(crate) direct_composition: Option<DirectComposition>,
+    /// Ghostex: the wallpaper, picture or live backdrop drawn under this window's content.
+    pub(crate) backdrop: crate::directx_backdrop::Backdrop,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -115,9 +117,11 @@ impl Drop for Annotation<'_> {
     }
 }
 
-struct DirectComposition {
+pub(crate) struct DirectComposition {
     comp_device: IDCompositionDevice,
     comp_target: IDCompositionTarget,
+    /// Ghostex: the target's root, holding GPUI's visual and, under it, the window's backdrop.
+    root_visual: IDCompositionVisual,
     comp_visual: IDCompositionVisual,
 }
 
@@ -190,6 +194,7 @@ impl DirectXRenderer {
             globals,
             pipelines,
             direct_composition,
+            backdrop: Default::default(),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -282,6 +287,8 @@ impl DirectXRenderer {
                     .log_err();
             }
 
+            // The backdrop's visual and textures belong to the lost device.
+            self.backdrop.release_gpu();
             self.direct_composition.take();
             self.devices.take();
         }
@@ -324,6 +331,7 @@ impl DirectXRenderer {
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
         self.skip_draws = true;
+        self.redraw_backdrop();
         Ok(())
     }
 
@@ -1017,11 +1025,13 @@ impl DirectComposition {
         // CDXC:CefRuntime 2026-09-26 WHY:
         // A topmost composition target covers child HWNDs, including windowed CEF pages. Keep the GPUI visual tree below native child windows so transparent hosts can display their embedded content.
         let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
+        let root_visual = unsafe { comp_device.CreateVisual() }?;
         let comp_visual = unsafe { comp_device.CreateVisual() }?;
 
         Ok(Self {
             comp_device,
             comp_target,
+            root_visual,
             comp_visual,
         })
     }
@@ -1029,7 +1039,31 @@ impl DirectComposition {
     pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
         unsafe {
             self.comp_visual.SetContent(swap_chain)?;
-            self.comp_target.SetRoot(&self.comp_visual)?;
+            self.root_visual
+                .AddVisual(&self.comp_visual, true, None::<&IDCompositionVisual>)?;
+            self.comp_target.SetRoot(&self.root_visual)?;
+            self.comp_device.Commit()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn device(&self) -> &IDCompositionDevice {
+        &self.comp_device
+    }
+
+    /// Ghostex: puts a backdrop visual behind GPUI's content.
+    pub(crate) fn add_backdrop(&self, visual: &IDCompositionVisual) -> Result<()> {
+        unsafe {
+            self.root_visual
+                .AddVisual(visual, false, &self.comp_visual)?;
+            self.comp_device.Commit()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove_backdrop(&self, visual: &IDCompositionVisual) -> Result<()> {
+        unsafe {
+            self.root_visual.RemoveVisual(visual)?;
             self.comp_device.Commit()?;
         }
         Ok(())
